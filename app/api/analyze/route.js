@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
 const allowed = ['imobiliare.ro','storia.ro','olx.ro','homezz.ro','romimo.ro','publi24.ro','remax.ro','blitz.ro','napocaimobiliare.ro'];
-const weights = {thermal:15,acoustic:12,visual:12,structural:18,materials:10,layout:15,liveability:10,neighbourhood:8};
+const weights = {thermal:12,acoustic:10,visual:10,structural:15,materials:10,layout:15,liveability:10,neighbourhood:18};
 const keys = Object.keys(weights);
 const json = (data, status=200) => NextResponse.json(data,{status});
 
@@ -33,19 +33,54 @@ async function fetchListing(url) {
     return htmlToText(raw.slice(0,1500000));
   } catch { return ''; }
 }
-function normalizeCriteria(obj) {
+const subcriteria = {
+ structural:[['era','Anul și perioada construcției',20],['structure','Tipul structurii',25],['documents','Documentație tehnică',35],['condition','Stare și intervenții',20]],
+ layout:[['area','Suprafață și camere',40],['distribution','Compartimentare',30],['bathrooms','Numărul băilor',15],['kitchen','Bucătărie și depozitare',15]],
+ thermal:[['insulation','Izolație',25],['windows','Ferestre',20],['heating','Încălzire',25],['energy','Eficiență energetică',20],['ventilation','Ventilație',10]],
+ acoustic:[['between','Izolare între apartamente',35],['outside','Zgomot exterior',30],['position','Poziția în clădire',20],['windows','Protecție fonică ferestre',15]],
+ visual:[['orientation','Orientare',30],['windows','Suprafață vitrată',25],['obstructions','Etaj și obstacole',25],['view','Vedere și intimitate',20]],
+ materials:[['quality','Calitatea materialelor',35],['workmanship','Calitatea execuției',30],['design','Aspect și design',25],['condition','Starea actuală',10]],
+ liveability:[['ergonomics','Ergonomie',30],['privacy','Intimitate',25],['terrace','Balcon sau terasă',20],['storage','Depozitare și dotări',15],['access','Acces și facilități',10]],
+ neighbourhood:[['base','Reper cartier',0],['quiet','Liniște și trafic',0],['transport','Transport și servicii',0],['walking','Acces pietonal',0],['parking','Parcare și acces',0]]
+};
+const neighbourhoodBases = [
+ [['centru','ultracentru','gheorgheni','andrei muresanu'],9],
+ [['grigorescu','zorilor','marasti','plopilor'],8],
+ [['manastur','buna ziua','borhanci','sopor'],6],
+ [['iris','someseni','bulgaria'],4],
+ [['floresti','baciu','apahida'],2]
+];
+function plain(text){return String(text||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9 ]/g,' ')}
+function areaBase(text){const t=plain(text);for(const [names,base] of neighbourhoodBases){if(names.some(name=>new RegExp('(^|\\s)'+name+'($|\\s)').test(t)))return base;}return null;}
+const clampScore = n=>Math.max(1,Math.min(10,Math.round(n*10)/10));
+function normalizeCriteria(obj,source) {
   const out = {};
+  const base = areaBase(source);
   for (const key of keys) {
     const v = obj?.[key] || {};
-    const n = Number(v.score);
-    out[key] = {
-      score: v.score == null || !Number.isFinite(n) ? 5 : Math.max(1,Math.min(10,n)),
-      reason: String(v.reason || 'Scor neutru estimat din lipsa informatiilor; nu exista suficiente dovezi pentru o evaluare specifica.'),
-      basis: String(v.basis || 'Nu exista suficiente informatii verificabile.'),
-      toVerify: String(v.toVerify || 'Solicita detalii si documente relevante.'),
-      confidence: ['high','moderate','low'].includes(v.confidence) ? v.confidence : 'low',
-      evidence: ['declared','inferred','estimated','documented','unknown'].includes(v.evidence) ? v.evidence : 'estimated'
-    };
+    const incoming = v.subcriteria && typeof v.subcriteria==='object' ? v.subcriteria : {};
+    const sub = {};
+    for(const [id,name] of subcriteria[key]){
+      const raw = incoming[id];const n=Number(typeof raw==='object'&&raw!==null?raw.score:raw);
+      sub[id]={name,score:raw==null||!Number.isFinite(n)?5:clampScore(n)};
+    }
+    let score;
+    let adjustment=null;
+    if(key==='neighbourhood' && base!==null){
+      const n=Number(v.microzoneAdjustment);
+      adjustment=Number.isFinite(n)&&v.microzoneAdjustment!=null?Math.max(-2,Math.min(2,Math.round(n*2)/2)):0;
+      score=clampScore(base+adjustment);
+      sub.base.score=base;
+    }else if(key==='neighbourhood'){
+      const n=Number(v.score);score=v.score==null||!Number.isFinite(n)?5:clampScore(n);
+    }else{
+      score=clampScore(subcriteria[key].reduce((sum,[id,,w])=>sum+sub[id].score*w,0)/100);
+    }
+    out[key]={score,subcriteria:sub,microzoneAdjustment:adjustment,neighbourhoodBase:key==='neighbourhood'?base:null,
+      reason:String(v.reason||'Scor orientativ; sunt necesare mai multe informații pentru o evaluare precisă.'),
+      basis:String(v.basis||'Date limitate.'),toVerify:String(v.toVerify||'Verifică informațiile relevante.'),
+      confidence:['high','moderate','low'].includes(v.confidence)?v.confidence:'low',
+      evidence:['declared','inferred','estimated','documented','unknown'].includes(v.evidence)?v.evidence:'estimated'};
   }
   return out;
 }
@@ -63,10 +98,19 @@ export async function POST(request) {
   const extracted = url ? await fetchListing(url) : '';
   if (extracted.length < 100 && description.length < 30) return json({error:'Nu am putut extrage anuntul. Adauga manual o descriere de minimum 30 de caractere.'},422);
   const source = [url ? `Link: ${url}` : '', extracted.length>=100 ? `Text extras: ${extracted}` : '',description ? `Descriere introdusa: ${description}` : ''].filter(Boolean).join('\n\n');
-  const system = `Esti analist imobiliar prudent pentru Romania. Raspunde EXCLUSIV JSON valid in romana. Evalueaza 8 criterii, FIECARE cu scor numeric 1-10, inclusiv cand datele lipsesc. Cand lipsesc informatiile, foloseste 5/10 ca estimare neutra, evidence:"estimated", confidence:"low"; ajusteaza doar pe baza unor indicii concrete. Scorul estimat NU reprezinta expertiza tehnica sau confirmarea sigurantei. Nu inventa acte, expertize, preturi, orientare, caracteristici ori date de piata. 9 si 10 sunt rare si necesita dovezi consistente; nu le acorda pe baza adjectivelor publicitare. Pentru FIECARE criteriu furnizeaza explicatie specifica de minimum 2 propozitii: ce sustine nota si ce o limiteaza; basis: indicii concrete sau absenta lor; toVerify: ce ar trebui verificat pentru a confirma sau corecta scorul. Evita afirmatii nefondate. Evidenta: documented doar cu document verificabil in datele furnizate; declared pentru afirmatii explicite din anunt; inferred pentru inferente justificate; estimated pentru estimari cu date insuficiente. Confidence: high/moderate/low.
-Subcriterii cu ponderi interne: structural: vechime/norme 20, tip structura 25, documentatie/expertize 35, degradari 20 (vechimea nu confirma siguranta); layout: suprafata raportata la camere 40, distributie 30, bai 15, bucatarie/depozitare 15; thermal: izolatie 25, tamplarie 20, incalzire 25, certificat/consum 20, ventilatie 10; acoustic: izolare intre apartamente 35, zgomot exterior 30, pozitie 20, tamplarie 15; visual: orientare 30, ferestre 25, etaj/obstacole 25, panorama/intimitate 20; materials: materiale 35, executie 30, estetica 25, intretinere 10; liveability: ergonomie 30, intimitate 25, balcon/terasa 20, depozitare 15, accesibilitate 10; neighbourhood: siguranta/calitate mediu 25, liniste/densitate 25, transport/servicii 20, infrastructura 15, parcare 15.
-Exemple excelente: compartimentare decomandata eficienta, minimum doua bai pentru 3-4 camere, parcare securizata intabulata, izolatie buna, incalzire in pardoseala, orientare sudica cu protectie la supraincalzire, vedere libera, terasa utilizabila 8-10 mp, servicii accesibile pe jos. Exemple negative: igrasie, infiltratii, zgomot mare, compartimentare vagon, lipsa intimitatii, finisaje defectuoase, infrastructura proasta si trafic sever. Nu presupune ca o facilitate exista doar fiindca e comuna zonei. Nu confunda confortul interior cu vecinatatea.
-Schema: {"summary":"string","criteria":{"structural":{"score":5,"reason":"explicatie detaliata, minimum doua propozitii","basis":"indicii concrete sau absenta datelor","toVerify":"ce trebuie verificat","evidence":"estimated","confidence":"low"},"layout":{},"thermal":{},"acoustic":{},"visual":{},"materials":{},"liveability":{},"neighbourhood":{}},"investment":{"score":null,"reason":"string"},"confidence":"moderate","layout":"string","warnings":["string"],"missing":["string"],"questions":["string"],"checklist":["string"]}. Investitia poate ramane null daca lipsesc date economice. Pentru fiecare criteriu completeaza toate campurile; adauga avertismente specifice si intrebari utile. Scorurile sunt orientative, nu evaluari certificate.`;
+  const system = `Ești analist imobiliar prudent pentru Cluj-Napoca și împrejurimi. Răspunde EXCLUSIV JSON valid în română. Evaluează fiecare dintre cele 8 criterii și fiecare subcriteriu cu o notă numerică de la 1 la 10. Dacă datele lipsesc, acordă 5/10 ca estimare neutră; nu inventa documente, expertize, caracteristici, prețuri comparabile sau măsurători. Scorurile 9 și 10 necesită indicii consistente. Explică fiecare criteriu prin reason (minimum două propoziții), basis (dovezi/indicii) și toVerify (ce trebuie verificat). evidence poate fi documented, declared, inferred, estimated; confidence poate fi high, moderate, low. Aceste etichete nu trebuie să apară în explicații ca texte repetitive.
+Scorurile subcriteriilor sunt calculate ulterior de server prin ponderi interne; tu furnizezi scorurile individuale, fără să calculezi scorul final. Folosește EXACT aceste chei în subcriteria:
+structural: era, structure, documents, condition;
+layout: area, distribution, bathrooms, kitchen;
+thermal: insulation, windows, heating, energy, ventilation;
+acoustic: between, outside, position, windows;
+visual: orientation, windows, obstructions, view;
+materials: quality, workmanship, design, condition;
+liveability: ergonomics, privacy, terrace, storage, access;
+neighbourhood: base, quiet, transport, walking, parking.
+Pentru neighbourhood, serverul aplică grila de cartiere: 5/5 reper 9 (Centru/Ultracentru, Gheorgheni, Andrei Mureșanu); 4/5 reper 8 (Grigorescu, Zorilor, Mărăști, Plopilor); 3/5 reper 6 (Mănăștur, Bună Ziua, Borhanci, Sopor); 2/5 reper 4 (Iris, Someșeni, Bulgaria); 1/5 reper 2 (Florești, Baciu, Apahida). Furnizează microzoneAdjustment între -2 și +2 în pași de 0,5, justificat STRICT prin informații despre microzonă, trafic, acces, zgomot și servicii. Dacă nu sunt indicii suficiente, folosește 0. Nu confunda calitatea clădirii cu amplasamentul. Serverul impune limita ±2 și intervalul 1–10. Pentru cartiere neidentificate, estimează prudent neighbourhood.score, fără să inventezi un reper.
+Siguranța structurală nu poate fi confirmată numai din anul clădirii. Riscurile grave, dacă sunt cunoscute, trebuie explicate la criteriul corespunzător, nu ascunse. Pentru investiție ia în calcul echilibrul dintre randament net din chirie, apreciere, lichiditate și preț/riscuri; dacă nu există date economice suficiente, investment.score poate fi null.
+Schema obligatorie: {"summary":"string","criteria":{"structural":{"score":5,"subcriteria":{"era":5,"structure":5,"documents":5,"condition":5},"reason":"string","basis":"string","toVerify":"string","evidence":"estimated","confidence":"low"},"layout":{"subcriteria":{"area":5,"distribution":5,"bathrooms":5,"kitchen":5},"reason":"string"},"thermal":{"subcriteria":{"insulation":5,"windows":5,"heating":5,"energy":5,"ventilation":5}},"acoustic":{"subcriteria":{"between":5,"outside":5,"position":5,"windows":5}},"visual":{"subcriteria":{"orientation":5,"windows":5,"obstructions":5,"view":5}},"materials":{"subcriteria":{"quality":5,"workmanship":5,"design":5,"condition":5}},"liveability":{"subcriteria":{"ergonomics":5,"privacy":5,"terrace":5,"storage":5,"access":5}},"neighbourhood":{"score":5,"microzoneAdjustment":0,"subcriteria":{"base":5,"quiet":5,"transport":5,"walking":5,"parking":5}}},"investment":{"score":null,"reason":"string"},"layout":"string"}. Completează reason, basis, toVerify, evidence și confidence pentru TOATE criteriile, după modelul structural. Scorurile sunt orientative, nu expertize certificate.`;
   let upstream;
   try {
     upstream = await fetch('https://api.openai.com/v1/chat/completions',{
@@ -89,7 +133,7 @@ Schema: {"summary":"string","criteria":{"structural":{"score":5,"reason":"explic
     const payload = await upstream.json();
     parsed = JSON.parse(payload.choices?.[0]?.message?.content || '{}');
   } catch { return json({error:'Raspuns AI invalid. Incearca din nou.'},502); }
-  const criteria = normalizeCriteria(parsed.criteria);
+  const criteria = normalizeCriteria(parsed.criteria,source);
   const coverage = keys.reduce((s,k)=>s+(["documented","declared","inferred"].includes(criteria[k].evidence)?weights[k]:0),0);
   const weighted = keys.reduce((s,k)=>s+(criteria[k].score==null?0:criteria[k].score*weights[k]),0);
   const quality = Math.round((weighted/100)*10)/10;
