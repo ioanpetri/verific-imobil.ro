@@ -39,9 +39,12 @@ function normalizeCriteria(obj) {
     const v = obj?.[key] || {};
     const n = Number(v.score);
     out[key] = {
-      score: v.score == null || !Number.isFinite(n) ? null : Math.max(0,Math.min(10,n)),
-      reason: String(v.reason || 'Informatii insuficiente.'),
-      evidence: ['declared','inferred','unknown'].includes(v.evidence) ? v.evidence : 'unknown'
+      score: v.score == null || !Number.isFinite(n) ? 5 : Math.max(1,Math.min(10,n)),
+      reason: String(v.reason || 'Scor neutru estimat din lipsa informatiilor; nu exista suficiente dovezi pentru o evaluare specifica.'),
+      basis: String(v.basis || 'Nu exista suficiente informatii verificabile.'),
+      toVerify: String(v.toVerify || 'Solicita detalii si documente relevante.'),
+      confidence: ['high','moderate','low'].includes(v.confidence) ? v.confidence : 'low',
+      evidence: ['declared','inferred','estimated','documented','unknown'].includes(v.evidence) ? v.evidence : 'estimated'
     };
   }
   return out;
@@ -60,7 +63,10 @@ export async function POST(request) {
   const extracted = url ? await fetchListing(url) : '';
   if (extracted.length < 100 && description.length < 30) return json({error:'Nu am putut extrage anuntul. Adauga manual o descriere de minimum 30 de caractere.'},422);
   const source = [url ? `Link: ${url}` : '', extracted.length>=100 ? `Text extras: ${extracted}` : '',description ? `Descriere introdusa: ${description}` : ''].filter(Boolean).join('\n\n');
-  const system = `Esti analist imobiliar prudent. Raspunde EXCLUSIV cu un obiect JSON valid, in romana. Evalueaza doar dovezile disponibile; nu inventa date despre structura, siguranta, izolatie, randament, acte sau preturi de piata. Marcheaza necunoscut cu score:null si evidence:"unknown". Distingi "declared" (afirmat in anunt), "inferred" (inferenta prudenta) si "unknown". Nu presupune ca decomandat, semidecomandat, nedecomandat sau circular au o ierarhie universala. Scorurile sunt intre 0 si 10. Schema: {"summary":"string","criteria":{"thermal":{"score":null,"reason":"string","evidence":"unknown"},"acoustic":{},"visual":{},"structural":{},"materials":{},"layout":{},"liveability":{},"neighbourhood":{}},"investment":{"score":null,"reason":"string"},"confidence":"string","layout":"string","warnings":["string"],"missing":["string"],"questions":["string"],"checklist":["string"]}. Completeaza fiecare criteriu cu score, reason si evidence.`;
+  const system = `Esti analist imobiliar prudent pentru Romania. Raspunde EXCLUSIV JSON valid in romana. Evalueaza 8 criterii, FIECARE cu scor numeric 1-10, inclusiv cand datele lipsesc. Cand lipsesc informatiile, foloseste 5/10 ca estimare neutra, evidence:"estimated", confidence:"low"; ajusteaza doar pe baza unor indicii concrete. Scorul estimat NU reprezinta expertiza tehnica sau confirmarea sigurantei. Nu inventa acte, expertize, preturi, orientare, caracteristici ori date de piata. 9 si 10 sunt rare si necesita dovezi consistente; nu le acorda pe baza adjectivelor publicitare. Pentru FIECARE criteriu furnizeaza explicatie specifica de minimum 2 propozitii: ce sustine nota si ce o limiteaza; basis: indicii concrete sau absenta lor; toVerify: ce ar trebui verificat pentru a confirma sau corecta scorul. Evita afirmatii nefondate. Evidenta: documented doar cu document verificabil in datele furnizate; declared pentru afirmatii explicite din anunt; inferred pentru inferente justificate; estimated pentru estimari cu date insuficiente. Confidence: high/moderate/low.
+Subcriterii cu ponderi interne: structural: vechime/norme 20, tip structura 25, documentatie/expertize 35, degradari 20 (vechimea nu confirma siguranta); layout: suprafata raportata la camere 40, distributie 30, bai 15, bucatarie/depozitare 15; thermal: izolatie 25, tamplarie 20, incalzire 25, certificat/consum 20, ventilatie 10; acoustic: izolare intre apartamente 35, zgomot exterior 30, pozitie 20, tamplarie 15; visual: orientare 30, ferestre 25, etaj/obstacole 25, panorama/intimitate 20; materials: materiale 35, executie 30, estetica 25, intretinere 10; liveability: ergonomie 30, intimitate 25, balcon/terasa 20, depozitare 15, accesibilitate 10; neighbourhood: siguranta/calitate mediu 25, liniste/densitate 25, transport/servicii 20, infrastructura 15, parcare 15.
+Exemple excelente: compartimentare decomandata eficienta, minimum doua bai pentru 3-4 camere, parcare securizata intabulata, izolatie buna, incalzire in pardoseala, orientare sudica cu protectie la supraincalzire, vedere libera, terasa utilizabila 8-10 mp, servicii accesibile pe jos. Exemple negative: igrasie, infiltratii, zgomot mare, compartimentare vagon, lipsa intimitatii, finisaje defectuoase, infrastructura proasta si trafic sever. Nu presupune ca o facilitate exista doar fiindca e comuna zonei. Nu confunda confortul interior cu vecinatatea.
+Schema: {"summary":"string","criteria":{"structural":{"score":5,"reason":"explicatie detaliata, minimum doua propozitii","basis":"indicii concrete sau absenta datelor","toVerify":"ce trebuie verificat","evidence":"estimated","confidence":"low"},"layout":{},"thermal":{},"acoustic":{},"visual":{},"materials":{},"liveability":{},"neighbourhood":{}},"investment":{"score":null,"reason":"string"},"confidence":"moderate","layout":"string","warnings":["string"],"missing":["string"],"questions":["string"],"checklist":["string"]}. Investitia poate ramane null daca lipsesc date economice. Pentru fiecare criteriu completeaza toate campurile; adauga avertismente specifice si intrebari utile. Scorurile sunt orientative, nu evaluari certificate.`;
   let upstream;
   try {
     upstream = await fetch('https://api.openai.com/v1/chat/completions',{
@@ -84,9 +90,9 @@ export async function POST(request) {
     parsed = JSON.parse(payload.choices?.[0]?.message?.content || '{}');
   } catch { return json({error:'Raspuns AI invalid. Incearca din nou.'},502); }
   const criteria = normalizeCriteria(parsed.criteria);
-  const coverage = keys.reduce((s,k)=>s+(criteria[k].score==null?0:weights[k]),0);
+  const coverage = keys.reduce((s,k)=>s+(["documented","declared","inferred"].includes(criteria[k].evidence)?weights[k]:0),0);
   const weighted = keys.reduce((s,k)=>s+(criteria[k].score==null?0:criteria[k].score*weights[k]),0);
-  const quality = coverage>=60 ? Math.round((weighted/coverage)*10)/10 : null;
+  const quality = Math.round((weighted/100)*10)/10;
   const inv = Number(parsed.investment?.score);
   const investment = {score:parsed.investment?.score == null || !Number.isFinite(inv) ? null : Math.max(0,Math.min(10,inv)),reason:String(parsed.investment?.reason||'Informatii insuficiente.')};
   return json({summary:String(parsed.summary||''),criteria,quality,coverage,investment,confidence:String(parsed.confidence||''),layout:String(parsed.layout||''),warnings:array(parsed.warnings),missing:array(parsed.missing),questions:array(parsed.questions),checklist:array(parsed.checklist)});
