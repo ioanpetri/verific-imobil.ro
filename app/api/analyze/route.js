@@ -138,6 +138,28 @@ Schema obligatorie: {"summary":"string","criteria":{"structural":{"score":5,"sub
   // Acoperirea este raportata numai cand exista provenienta pozitiva identificata.
   // Zero etichete pozitive nu dovedeste zero informatii in anunt.
   const coveredWeight = keys.reduce((s,k)=>s+(["documented","declared","inferred"].includes(criteria[k].evidence)?weights[k]:0),0);
+  // Completitudinea este calculata numai din date explicit prezente in textul sursa,
+  // nu din etichetele criteriilor generate de model.
+  const explicitFields = [
+    ['price',/(?:\bpret\b|\bpreț\b|\bprice\b|\b€\b|\bEUR\b|\beuro\b)/i],
+    ['area',/\b\d{2,3}(?:[.,]\d+)?\s*(?:mp|m²|metri patrați)\b/i],
+    ['rooms',/\b\d+\s*(?:camere|camera|dormitoare)\b/i],
+    ['floor',/\b(?:etaj(?:ul)?|parter|mansardă|mansarda)\b/i],
+    ['year',/\b(?:19|20)\d{2}\b/],
+    ['neighbourhood',/\b(?:Gheorgheni|Mărăști|Marasti|Mănăștur|Manastur|Zorilor|Grigorescu|Centru|Bună Ziua|Buna Ziua|Borhanci|Florești|Floresti|Iris|Someșeni|Someseni|Plopilor|Sopor|Baciu|Apahida|Bulgaria|Andrei Mureșanu)\b/i],
+    ['structure',/\b(?:beton armat|cadre|structur[ăa]|cărămidă|caramida|prefabricat)\b/i],
+    ['insulation',/\b(?:izolat|izolație|izolatie|termoizolație|termoizolatie|polistiren|vată minerală)\b/i],
+    ['heating',/\b(?:central[ăa]|încălzire|incalzire|calorifer|pardoseală|pardoseala)\b/i],
+    ['windows',/\b(?:termopan|tripan|geamuri|ferestre|tâmplărie|tamplarie)\b/i],
+    ['energy',/\b(?:certificat energetic|clas[ăa] energetic[ăa])\b/i],
+    ['layout',/\b(?:decomandat|semidecomandat|nedecomandat|open.space|bucătărie|bucatarie)\b/i],
+    ['orientation',/\b(?:orientare|nord|sud|est|vest|luminozitate)\b/i],
+    ['balcony',/\b(?:balcon|teras[ăa]|logie)\b/i],
+    ['parking',/\b(?:parcare|garaj|loc de parcare)\b/i],
+    ['condition',/\b(?:renovat|finisaj|finisaje|stare bună|stare buna|infiltrații|infiltratii)\b/i]
+  ];
+  const available = explicitFields.filter(([,regex])=>regex.test(source)).length;
+  const completeness = {percent:Math.round(available/explicitFields.length*100),available,total:explicitFields.length,derived:0};
   const coverage = coveredWeight > 0 ? coveredWeight : null;
   const weighted = keys.reduce((s,k)=>s+(criteria[k].score==null?0:criteria[k].score*weights[k]),0);
   const quality = Math.round((weighted/100)*10)/10;
@@ -160,5 +182,5 @@ Schema obligatorie: {"summary":"string","criteria":{"structural":{"score":5,"sub
     reason:String(parsed.investment?.reason || 'Estimare orientativă. Fără date verificabile despre chiria netă, piață și costuri, componentele necunoscute sunt neutre (5/10).')
   };
   const general = clampScore(quality*0.7 + acquisition.score*0.3);
-  return json({summary:String(parsed.summary||''),criteria,quality,acquisition,general,coverage,investment,confidence:String(parsed.confidence||''),layout:String(parsed.layout||''),warnings:array(parsed.warnings),missing:array(parsed.missing),questions:array(parsed.questions),checklist:array(parsed.checklist)});
+  return json({summary:String(parsed.summary||''),criteria,quality,acquisition,general,coverage,completeness,investment,confidence:String(parsed.confidence||''),layout:String(parsed.layout||''),warnings:array(parsed.warnings),missing:array(parsed.missing),questions:array(parsed.questions),checklist:array(parsed.checklist)});
 }
