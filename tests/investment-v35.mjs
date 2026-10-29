@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import {investmentV35,lin} from '../app/lib/investment-v35.js';
+assert.equal(lin(.015,.015,.05),1);
+assert.equal(lin(.05,.015,.05),10);
+assert.equal(lin(.03,.05,.015)>1,true);
+let a=investmentV35({financed:false,newDevelopment:false});
+assert.equal(a.composite,null);assert.equal(a.components.RN.score,null);assert.equal(a.provisional,true);
+const data={monthlyRent:560,vacancyMonths:.5,transactionPrice:166355,acquisitionFees:3345,renovation:3000,furnishing:2000,initialFinanceCosts:0,localTax:150,insurance:80,maintenance:860,uncoveredExpenses:150,management:0,reletting:0,rentalTaxRate:.1,rentalTaxableFraction:.8,cass:0,riskFreeNet:.04,expectedInflation:.03,realWageGrowth:.03,localPTI:8,historicalPTI:8,localCagr36:.04,pricePerSqm:3300,fairPricePerSqm:3250,demandFundamentalsScore:7,futureSupplyRatio:.04,confirmedCatalystsScore:6,daysOnMarket:80,marketDepthScore:7,typologyScore:9,exitDiscountRate:.04,priceToHouseholdIncome:9,saleabilityScore:7,fairPrice:174000,legalScore:8,technicalScore:7,zoneRiskScore:7,financialRiskScore:7,rentalDemandScore:7};
+a=investmentV35({data,financed:false,newDevelopment:false,evidence:[{type:'official',weight:1}]});
+assert.equal(a.complete,true);assert.ok(a.composite>=1&&a.composite<=10);assert.ok(a.financials.netYieldPct>0);assert.equal(a.confidence,1);
+let b=investmentV35({data,financed:false,newDevelopment:false,verifiedRisks:{seriousLegalIssue:true}});
+assert.ok(b.composite<=4);assert.ok(b.components.PR.score<=3);
+console.log('investment-v35: 10 assertions passed');

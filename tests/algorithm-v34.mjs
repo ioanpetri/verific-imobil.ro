@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import {lin,weighted,powerGeneral,netYield,irr,evaluateAlgorithmV34} from '../app/lib/algorithm-v34.js';
+assert.equal(lin(0,-20,20),5.5);
+assert.equal(lin(45,45,10),1);
+assert.equal(lin(10,45,10),10);
+assert.equal(weighted({a:8,b:6},{a:.5,b:.5}).score,7);
+assert.equal(weighted({a:8},{a:.5,b:.5}).score,null);
+assert.equal(powerGeneral({living:8,acquisition:8,investment:8}),8);
+assert.equal(netYield({price:100000,monthlyRent:500,vacancyMonths:1}).yieldPct,5.5);
+assert.equal(irr([-100,110]),10);
+const full={unit:{areaPerPerson:8,planEfficiency:8,light:8,floor:8,outdoor:8,parkingStorage:8},building:{structure:8,energy:8,condition:8,density:8},location:{commute:8,transit:8,services:8,schools:8},environment:{noise:8,air:8,green:8,naturalRisks:8},costs:8};
+const input={profile:'home',livingIndicators:full,acquisition:{value:8,entryCosts:8,liquidity:8,legal:8,negotiation:8,affordability:8},investment:{yield:8,irrSpread:8,bear:8,rentalDemand:8,exitLiquidity:8,debtCoverage:8}};
+assert.equal(evaluateAlgorithmV34(input).scores.general,8);
+assert.equal(evaluateAlgorithmV34({...input,verifiedRisks:{seismicRsI:true}}).scores.general,3.5);
+assert.equal(evaluateAlgorithmV34({}).scores.general,null);
+console.log('v3.4: 11 assertions OK');

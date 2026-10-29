@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import {evaluateAcousticScreening,extractAcousticFacts} from '../app/lib/acoustic-v39.js';
+const empty=evaluateAcousticScreening();
+assert.equal(empty.confidence,0);
+assert.equal(empty.estimated,true);
+assert.ok(empty.score>=1&&empty.score<=10);
+const f={an_constructie:1982,structura:'panouri_prefabricate',perete_despartitor:'panou_prefabricat',perete_grosime_cm:14,placa_cm:14,pardoseala:'parchet_lipit',etaj:3,nr_etaje:10,fatada_dormitor:'strada',fatada_living:'strada',pereti_comuni:2,apartamente_pe_palier:4,vecin_sus:true,vecin_jos:true,lift_adiacent:true,strada_tip:'principala',distanta_strada_m:25,tramvai_m:60,geam:'dublu',rama:'pvc',ferestre_an:2012,grila_ventilatie:'standard'};
+const r=evaluateAcousticScreening({facts:f});
+assert.ok(r.confidence>=.4);assert.equal(Object.keys(r.subscores).length,4);assert.ok(r.estimations.lden_fatada>0);assert.ok(r.estimations.nivel_interior_noapte!=null);
+const sensitive=evaluateAcousticScreening({facts:f,profile:'somn_sensibil'});assert.notDeepEqual(sensitive.weights,r.weights);
+const house=evaluateAcousticScreening({facts:{...f,tip_imobil:'casa'}});assert.equal(house.subscores.izolare,undefined);assert.equal(Object.values(house.weights).reduce((a,b)=>a+b,0).toFixed(5),'1.00000');
+const extracted=extractAcousticFacts('Bloc construit in 1982, etaj 3/10, termopan PVC, strada principala');assert.equal(extracted.etaj,3);assert.equal(extracted.geam,'dublu');
+assert.ok(evaluateAcousticScreening({facts:{strada_tip:'artera',geam:'simplu'}}).score<evaluateAcousticScreening({facts:{strada_tip:'pietonala',geam:'triplu_acustic'}}).score);
+console.log('acoustic-v39: PASS');

@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+const source=readFileSync(new URL('../app/lib/structural-v36.js',import.meta.url),'utf8');
+const {evaluateStructuralScreening:evaluate}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const old=evaluate({text:'Apartament in bloc construit in 1972, etaj 3/8, renovat complet, stare buna.'});
+assert.equal(old.status,'date_insuficiente');assert.equal(old.class,null);assert.equal(old.subscores.A,25);
+assert.equal(old.score100,null);assert.ok(old.interval[0]<=old.interval[1]);
+const rs=evaluate({text:'Bloc construit in 2018 cu structura duala, expertiza seismica RsI, carte tehnica, autorizatie de construire si receptie.'});
+assert.ok(rs.veto.some(x=>x.code==='V2'));assert.ok(rs.interval[1]<=20);
+const altered=evaluate({text:'Bloc construit in 2009, cadre din beton armat, modificari structurale neautorizate, pereti demolati fara autorizatie.'});
+assert.ok(altered.veto.some(x=>x.code==='V3'));
+const recent=evaluate({text:'Bloc construit in 2020, pereti structurali din beton armat, renovat complet.'});
+assert.equal(recent.subscores.A,90);assert.equal(recent.subscores.B,85);
+console.log('structural v3.6 tests passed');

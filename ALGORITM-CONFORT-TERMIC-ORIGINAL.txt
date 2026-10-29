@@ -1,0 +1,290 @@
+"""
+Scor "Comfort termic" (1-10) pentru un imobil dintr-un anunț de vânzare.
+
+Subcriterii: Izolație, Ferestre, Încălzire, Eficiență energetică, Ventilație.
+
+Pași:
+ 1. Fiecare subcriteriu primește un scor 0-100 din câmpurile anunțului, folosind
+    proxy-uri fizice (rezistență termică R, transmitanță U, kWh/mp/an).
+ 2. Câmpurile lipsă sunt imputate dintr-un "prior" bazat pe anul construcției;
+    scorul se trage spre prior proporțional cu datele lipsă (încredere).
+ 3. Corecții de interacțiune între subcriterii (ex.: ferestre etanșe fără ventilație).
+ 4. Agregare: medie ponderată (aritmetică) amestecată cu medie geometrică
+    (penalizează "veriga slabă").
+ 5. Mapare 0-100 -> 1-10 + încredere + explicații.
+"""
+from dataclasses import dataclass, field
+from math import exp, log
+from typing import Optional
+
+
+def clip(x, lo=0.0, hi=100.0):
+    return max(lo, min(hi, x))
+
+
+@dataclass
+class Anunt:
+    an_constructie: Optional[int] = None
+    pozitie: Optional[str] = None            # parter | intermediar | ultim_etaj | casa
+    apartament_colt: Optional[bool] = None
+    orientare: Optional[str] = None          # N | S | E | V | traversant
+    mucegai_semnalat: bool = False
+    # Izolație
+    tip_perete: Optional[str] = None         # beton_prefabricat | caramida_plina | caramida_goala | bca | icf | lemn
+    izolatie_tip: Optional[str] = None       # fara | eps | xps | vata_minerala | interior
+    izolatie_cm: Optional[float] = None
+    acoperis_terasa_izolat: Optional[bool] = None
+    # Ferestre
+    ferestre_material: Optional[str] = None  # pvc | lemn | aluminiu_rpt | aluminiu
+    ferestre_geam: Optional[str] = None      # simplu | dublu | triplu
+    ferestre_low_e: Optional[bool] = None
+    ferestre_an: Optional[int] = None
+    procent_vitrat: Optional[float] = None   # % din suprafața utilă
+    protectie_solara: Optional[bool] = None
+    # Încălzire
+    incalzire_tip: Optional[str] = None      # pompa_caldura | centrala_condensatie | centrala_gaz | termoficare |
+                                             # peleti | electric | soba
+    distributie: Optional[str] = None        # pardoseala | radiatoare | convectori
+    reglaj: list = field(default_factory=list)  # termostat_smart | termostat | robineti_termostatici | contorizare
+    # Eficiență
+    clasa_energetica: Optional[str] = None   # A+ ... G
+    consum_kwh_mp_an: Optional[float] = None
+    fotovoltaic: Optional[bool] = None
+    # Ventilație
+    ventilatie_tip: Optional[str] = None     # hrv | mecanica | higroreglabila | naturala
+    hota_evacuare: Optional[bool] = None
+    baie_cu_fereastra: Optional[bool] = None
+
+
+PONDERI = {"izolatie": 0.30, "ferestre": 0.20, "incalzire": 0.20,
+           "eficienta": 0.20, "ventilatie": 0.10}
+MIX_ARITMETIC = 0.70   # restul = medie geometrică (veriga slabă)
+
+
+# ---------- prior pe an de construcție (valori tipice) ----------
+def prior(sub, an):
+    benzi = [(1960, 1977, 1990, 2005, 2013, 2020)]
+    tabel = {  # <1960, 60-77, 77-90, 90-05, 05-13, 13-20, >20
+        "izolatie":   [25, 20, 18, 30, 55, 72, 82],
+        "ferestre":   [25, 25, 25, 40, 60, 75, 85],
+        "incalzire":  [35, 45, 50, 55, 65, 75, 85],
+        "eficienta":  [20, 18, 18, 32, 52, 70, 85],
+        "ventilatie": [50, 45, 45, 40, 45, 55, 70],
+    }
+    if an is None:
+        return 40.0
+    limite = [1960, 1977, 1990, 2005, 2013, 2020]
+    i = sum(an >= l for l in limite)
+    return float(tabel[sub][i])
+
+
+def _combina(valori):
+    """valori = [(scor|None, pondere)] -> (scor mediu, grad_cunoscut)."""
+    tot = sum(w for _, w in valori)
+    cunoscute = [(s, w) for s, w in valori if s is not None]
+    if not cunoscute:
+        return None, 0.0
+    wc = sum(w for _, w in cunoscute)
+    return sum(s * w for s, w in cunoscute) / wc, wc / tot
+
+
+# ---------- 1. IZOLAȚIE ----------
+R_PERETE = {"beton_prefabricat": 0.4, "caramida_plina": 0.7, "caramida_goala": 1.5,
+            "bca": 2.0, "icf": 3.0, "lemn": 2.5}
+LAMBDA = {"eps": 0.040, "xps": 0.035, "vata_minerala": 0.037, "interior": 0.040}
+
+
+def scor_izolatie(a, note):
+    r_perete = R_PERETE.get(a.tip_perete)
+    if a.izolatie_tip == "fara":
+        r_iz = 0.0
+    elif a.izolatie_tip in LAMBDA and a.izolatie_cm:
+        r_iz = (a.izolatie_cm / 100) / LAMBDA[a.izolatie_tip]
+        if a.izolatie_tip == "interior":
+            r_iz *= 0.75                      # punți termice la planșee/colțuri
+    else:
+        r_iz = None
+    if r_perete is not None and r_iz is not None:
+        s_r, cunoscut = clip((r_perete + r_iz) / 4.0 * 100), 1.0   # R țintă = 4 m²K/W
+    elif r_perete is not None:                # izolație necunoscută -> jumătate din date
+        s_r, cunoscut = clip(r_perete / 4.0 * 100 + 15), 0.5
+    elif r_iz is not None:
+        s_r, cunoscut = clip((1.0 + r_iz) / 4.0 * 100), 0.6
+    else:
+        s_r, cunoscut = None, 0.0
+    ajustari = 0.0
+    if a.pozitie == "ultim_etaj" and a.acoperis_terasa_izolat is not True:
+        ajustari -= 12; note.append("Ultim etaj fără terasă/acoperiș izolat dovedit: -12 izolație")
+    if a.pozitie == "parter":
+        ajustari -= 6; note.append("Parter (pierderi prin planșeu): -6 izolație")
+    if a.apartament_colt:
+        ajustari -= 8; note.append("Apartament de colț: -8 izolație")
+    if a.mucegai_semnalat:
+        ajustari -= 15; note.append("Mucegai/condens semnalat (punți termice): -15 izolație")
+    if a.orientare == "S":
+        ajustari += 3
+    elif a.orientare == "N":
+        ajustari -= 5
+    return s_r, cunoscut, ajustari
+
+
+# ---------- 2. FERESTRE ----------
+U_GEAM = {("pvc", "dublu"): 1.4, ("pvc", "triplu"): 0.9, ("lemn", "dublu"): 1.5,
+          ("lemn", "triplu"): 1.0, ("aluminiu_rpt", "dublu"): 1.6,
+          ("aluminiu_rpt", "triplu"): 1.1, ("aluminiu", "dublu"): 3.0,
+          ("aluminiu", "triplu"): 2.2, ("pvc", "simplu"): 4.5, ("lemn", "simplu"): 2.8,
+          ("aluminiu", "simplu"): 5.0}
+
+
+def scor_ferestre(a, note):
+    cunoscut = 0.0
+    u = None
+    if a.ferestre_geam and a.ferestre_material:
+        u = U_GEAM.get((a.ferestre_material, a.ferestre_geam))
+        cunoscut = 0.8
+    elif a.ferestre_geam:
+        u = {"simplu": 4.5, "dublu": 1.8, "triplu": 1.1}[a.ferestre_geam]
+        cunoscut = 0.5
+    if u is None:
+        return None, 0.0, 0.0
+    if a.ferestre_low_e:
+        u -= 0.3
+    s = clip((5.0 - u) / (5.0 - 0.8) * 100)
+    ajust = 0.0
+    if a.ferestre_an:
+        varsta = 2026 - a.ferestre_an
+        if varsta > 15:
+            ajust -= min(15, (varsta - 15) * 1.0)
+            note.append(f"Ferestre vechi ({varsta} ani, garnituri uzate): {ajust:+.0f} ferestre")
+        cunoscut = min(1.0, cunoscut + 0.2)
+    if a.procent_vitrat and a.procent_vitrat > 25 and not a.protectie_solara:
+        ajust -= 6; note.append("Suprafață vitrată mare fără protecție solară (supraîncălzire vara): -6")
+    if a.orientare == "traversant":
+        ajust += 0
+    return s, cunoscut, ajust
+
+
+# ---------- 3. ÎNCĂLZIRE ----------
+BAZA_INCALZIRE = {"pompa_caldura": 92, "centrala_condensatie": 80, "peleti": 68,
+                  "centrala_gaz": 66, "termoficare": 52, "electric": 40, "soba": 32}
+MOD_DISTRIBUTIE = {"pardoseala": 10, "radiatoare": 0, "convectori": -5}
+MOD_REGLAJ = {"termostat_smart": 8, "termostat": 5, "robineti_termostatici": 3, "contorizare": 3}
+
+
+def scor_incalzire(a, note):
+    if a.incalzire_tip not in BAZA_INCALZIRE:
+        return None, 0.0, 0.0
+    s = BAZA_INCALZIRE[a.incalzire_tip]
+    cunoscut = 0.6
+    if a.distributie in MOD_DISTRIBUTIE:
+        s += MOD_DISTRIBUTIE[a.distributie]
+        cunoscut += 0.2
+        if a.incalzire_tip == "pompa_caldura" and a.distributie == "pardoseala":
+            s += 5; note.append("Sinergie pompă de căldură + pardoseală: +5 încălzire")
+        if a.incalzire_tip == "pompa_caldura" and a.distributie == "radiatoare":
+            s -= 6; note.append("Pompă de căldură pe radiatoare clasice (COP redus): -6")
+    if a.reglaj:
+        s += min(12, sum(MOD_REGLAJ.get(r, 0) for r in a.reglaj))
+        cunoscut += 0.2
+    return clip(s), min(cunoscut, 1.0), 0.0
+
+
+# ---------- 4. EFICIENȚĂ ENERGETICĂ ----------
+CLASA = {"A+": 100, "A": 92, "B": 80, "C": 66, "D": 52, "E": 38, "F": 24, "G": 10}
+
+
+def scor_eficienta(a, note):
+    s_clasa = CLASA.get((a.clasa_energetica or "").upper())
+    s_kwh = None
+    if a.consum_kwh_mp_an is not None:
+        s_kwh = clip(100 * (1 - (a.consum_kwh_mp_an - 40) / (450 - 40)))
+    s, cunoscut = _combina([(s_clasa, 0.4), (s_kwh, 0.6)])
+    if s is None:
+        return None, 0.0, 0.0
+    if s_clasa is not None and s_kwh is not None and abs(s_clasa - s_kwh) > 25:
+        cunoscut *= 0.8
+        note.append("Clasa energetică și consumul declarat nu se potrivesc (inconsistență): încredere redusă")
+    ajust = 6 if a.fotovoltaic else 0
+    if ajust:
+        note.append("Panouri fotovoltaice: +6 eficiență")
+    return s, max(cunoscut, 0.4), ajust
+
+
+# ---------- 5. VENTILAȚIE ----------
+BAZA_VENT = {"hrv": 95, "mecanica": 75, "higroreglabila": 70, "naturala": 50}
+
+
+def scor_ventilatie(a, note):
+    cunoscut = 0.0
+    s = None
+    if a.ventilatie_tip in BAZA_VENT:
+        s, cunoscut = BAZA_VENT[a.ventilatie_tip], 0.7
+    ajust = 0.0
+    extra = 0
+    for flag, val in ((a.hota_evacuare, 6), (a.baie_cu_fereastra, 5)):
+        if flag is not None:
+            extra += 1
+            ajust += val if flag else -val
+    if a.orientare == "traversant":
+        ajust += 10; note.append("Apartament traversant (aerisire încrucișată): +10 ventilație")
+    if s is None and extra == 0 and a.orientare != "traversant":
+        return None, 0.0, 0.0
+    if s is None:
+        s, cunoscut = 50, 0.3
+    cunoscut = min(1.0, cunoscut + 0.15 * extra)
+    return s, cunoscut, ajust
+
+
+FUNCTII = {"izolatie": scor_izolatie, "ferestre": scor_ferestre, "incalzire": scor_incalzire,
+           "eficienta": scor_eficienta, "ventilatie": scor_ventilatie}
+
+
+# ---------- AGREGARE ----------
+def calculeaza(a: Anunt):
+    note, scoruri, incredere = [], {}, {}
+    for nume, f in FUNCTII.items():
+        s, cunoscut, ajust = f(a, note)
+        p = prior(nume, a.an_constructie)
+        if s is None:
+            s, cunoscut = p, 0.0
+            note.append(f"{nume}: date lipsă, estimat din anul construcției ({p:.0f}/100)")
+        # contracție spre prior proporțional cu datele lipsă
+        s = cunoscut * clip(s + ajust) + (1 - cunoscut) * p if cunoscut < 1 else clip(s + ajust)
+        scoruri[nume], incredere[nume] = clip(s), cunoscut
+
+    # interacțiuni
+    etans = (a.ferestre_geam in ("dublu", "triplu") and a.ferestre_material in ("pvc", "aluminiu_rpt", "lemn")
+             and (a.ferestre_an or 0) >= 2008)
+    if etans and a.ventilatie_tip in (None, "naturala") and a.pozitie != "casa":
+        scoruri["ventilatie"] = clip(scoruri["ventilatie"] - 12)
+        note.append("Ferestre etanșe fără ventilație controlată (risc umiditate/mucegai): -12 ventilație")
+    if a.ventilatie_tip == "hrv" and scoruri["izolatie"] < 40:
+        note.append("HRV într-o clădire slab izolată: beneficiu limitat")
+    if scoruri["incalzire"] > 75 and scoruri["izolatie"] < 35:
+        scoruri["eficienta"] = clip(scoruri["eficienta"] - 8)
+        note.append("Încălzire bună într-o anvelopă slabă (pierderi mari): -8 eficiență")
+
+    # agregare
+    aritm = sum(PONDERI[k] * scoruri[k] for k in PONDERI)
+    geom = exp(sum(PONDERI[k] * log(max(scoruri[k], 1.0)) for k in PONDERI))
+    total = MIX_ARITMETIC * aritm + (1 - MIX_ARITMETIC) * geom
+    nota = round(1 + 9 * total / 100, 1)
+    incredere_tot = sum(PONDERI[k] * incredere[k] for k in PONDERI)
+    return {
+        "nota_1_10": nota,
+        "eticheta": ("Excelent" if nota >= 8.5 else "Bun" if nota >= 6.5 else
+                     "Mediu" if nota >= 4.5 else "Slab" if nota >= 3 else "Foarte slab"),
+        "incredere": round(incredere_tot, 2),
+        "subcriterii_1_10": {k: round(1 + 9 * v / 100, 1) for k, v in scoruri.items()},
+        "note": note,
+    }
+
+
+if __name__ == "__main__":
+    ex = Anunt(an_constructie=1985, pozitie="ultim_etaj", orientare="V", tip_perete="beton_prefabricat",
+               izolatie_tip="eps", izolatie_cm=8, ferestre_material="pvc", ferestre_geam="dublu",
+               ferestre_an=2016, incalzire_tip="centrala_condensatie", distributie="radiatoare",
+               reglaj=["termostat", "robineti_termostatici"], clasa_energetica="C",
+               consum_kwh_mp_an=160, hota_evacuare=True)
+    import json
+    print(json.dumps(calculeaza(ex), indent=2, ensure_ascii=False))

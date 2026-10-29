@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import {evaluateThermalScreening,extractThermalFacts} from '../app/lib/thermal-v38.js';
+const empty=evaluateThermalScreening({text:''});
+assert.equal(empty.confidence,0);
+assert.equal(empty.estimated,true);
+assert.ok(empty.score>=1&&empty.score<=10);
+const f={an_constructie:1985,pozitie:'ultim_etaj',orientare:'V',tip_perete:'beton_prefabricat',izolatie_tip:'eps',izolatie_cm:8,ferestre_material:'pvc',ferestre_geam:'dublu',ferestre_an:2016,incalzire_tip:'centrala_condensatie',distributie:'radiatoare',reglaj:['termostat','robineti_termostatici'],clasa_energetica:'C',consum_kwh_mp_an:160,hota_evacuare:true};
+const out=evaluateThermalScreening({facts:f});
+assert.ok(out.confidence>.4);
+assert.equal(Object.keys(out.subscores).length,5);
+assert.ok(out.notes.length);
+assert.equal(extractThermalFacts('Apartament construit in 1985, centrala proprie, termopan PVC').an_constructie,1985);
+assert.equal(extractThermalFacts('Apartament construit in 1985, centrala proprie, termopan PVC').incalzire_tip,'centrala_gaz');
+const old=evaluateThermalScreening({facts:{an_constructie:1970}});
+const newer=evaluateThermalScreening({facts:{an_constructie:2022}});
+assert.ok(newer.score>old.score);
+console.log('thermal-v38: PASS');

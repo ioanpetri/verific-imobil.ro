@@ -1,3 +1,8 @@
+import { evaluateAcousticScreening } from '../../lib/acoustic-v39.js';
+import { evaluateThermalScreening } from '../../lib/thermal-v38.js';
+import { evaluateLayoutScreening } from '../../lib/layout-v37.js';
+import {evaluateStructuralScreening} from '../../lib/structural-v36';
+import {evaluateAlgorithmV34} from '../../lib/algorithm-v34';
 import { NextResponse } from 'next/server';
 import { calibrateCriteria, guardMarketScores } from '../../lib/hybrid-engine';
 import marketData from '../../data/market-cluj.json';
@@ -115,7 +120,7 @@ const CLUJ_INDEX = [
   {label:'Iul 2026',period:'2026-07',value:3306,kind:'istoric'},
   {label:'Sep 2026',period:'2026-09',value:3316,kind:'istoric'}
 ];
-function estimatePrice(source, facts) {
+function estimatePrice(source, facts, askingPriceEur = null) {
   const numeric = n => Number.isFinite(Number(n)) && Number(n)>0 ? Number(n) : null;
   // Extragem numai valori prezente explicit; modelul nu are voie sa inventeze suprafete.
   const areaMatch = source.match(/(?:suprafata(?:\s+utila)?|suprafața(?:\s+utilă)?|utili|utila|utilă)\s*[:=]?\s*(\d{2,3}(?:[.,]\d+)?)\s*(?:mp|m²)/i)
@@ -127,7 +132,9 @@ function estimatePrice(source, facts) {
   const typical = !safeArea;
   const sqm = safeArea || 55; // suprafata EXEMPLU, NU media publicata de indice si NU caracteristica proprietatii
   const newest = CLUJ_INDEX.at(-1).value;
-  const baseline = sqm*newest;
+  const hasAskingPrice = Number.isFinite(askingPriceEur) && askingPriceEur >= 25000;
+  const adjustment = hasAskingPrice ? (askingPriceEur >= 100000 ? 10000 : 5000) : 0;
+  const baseline = hasAskingPrice ? askingPriceEur - adjustment : sqm*newest;
   // Doua observatii publice permit o linie istorica scurta, NU un trend anual robust.
   // Scenariul central este constant; intervalele +/-4% pe an sunt ipoteze ilustrative.
   const history = CLUJ_INDEX.map(x=>({label:x.label,period:x.period,value:Math.round(sqm*x.value),kind:'istoric',eurSqm:x.value}));
@@ -138,11 +145,13 @@ function estimatePrice(source, facts) {
     low:Math.round(baseline*Math.pow(0.96,months/12)),
     high:Math.round(baseline*Math.pow(1.04,months/12))
   }));
-  const margin=typical?0.25:0.18;
+  const margin=0.18;
   return {
-    low:Math.round(baseline*(1-margin)),mid:Math.round(baseline),high:Math.round(baseline*(1+margin)),history,forecast,
+    low:Math.round(baseline*(1-margin)),mid:Math.round(baseline),high:Math.round(baseline*(1+margin)),askingPriceEur:hasAskingPrice?askingPriceEur:null,history,forecast,
     typical,areaSqm:sqm,forecastAnnual:0,forecastConfidence:'scazuta',marketEurSqm:newest,marketPeriod:'2026-09',
-    basis:typical
+    basis:hasAskingPrice
+      ? `Reper central ilustrativ stabilit cu ${adjustment.toLocaleString('ro-RO')} € sub pretul solicitat de ${askingPriceEur.toLocaleString('ro-RO')} €. Intervalul este ±18% fata de reper. Aceasta regula este o ipoteza de prezentare, nu o evaluare independenta a pietei.`
+      :typical
       ? 'Reper de piata pentru un apartament exemplificativ de 55 mp in Cluj-Napoca; suprafata locuintei analizate nu a fost confirmata.'
       : `Estimare orientativa: ${sqm} mp × ${newest.toLocaleString('ro-RO')} €/mp (indicele Cluj-Napoca, septembrie 2026). Nu reprezinta pret de tranzactionare.`,
     sourceUrl:'https://www.imobiliare.ro/indicele-imobiliare-ro/cluj-napoca',
@@ -201,8 +210,37 @@ Schema obligatorie: {"summary":"string","criteria":{"structural":{"score":5,"sub
     parsed = JSON.parse(payload.choices?.[0]?.message?.content || '{}');
   } catch { return json({error:'Raspuns AI invalid. Incearca din nou.'},502); }
   const criteria = normalizeCriteria(parsed.criteria,source);
+  const structuralScreening = evaluateStructuralScreening({text:source});
+  if (structuralScreening.score10 != null && structuralScreening.confidence >= 0.40) {
+    criteria.structural.score = structuralScreening.score10;
+    criteria.structural.reason = `Screening structural ${structuralScreening.score100}/100; clasa interna ${structuralScreening.class}. Nu reprezinta expertiza tehnica.`;
+    criteria.structural.basis = `Evaluare determinista pe baza anuntului. Subscoruri: ${JSON.stringify(structuralScreening.subscores)}. Interval: ${structuralScreening.interval.join("-")}/100.`;
+    criteria.structural.toVerify = structuralScreening.questions.join(" ");
+  }
   const calibrationNotes = calibrateCriteria(criteria,source);
   const rubricChanges = applyEvidenceRubric(criteria,source);
+  const layoutScreening = evaluateLayoutScreening({text:source});
+  if (layoutScreening.score != null && layoutScreening.confidence >= 0.40) {
+    criteria.layout.score = layoutScreening.score;
+    criteria.layout.reason = `Compartimentare si functionalitate: ${layoutScreening.score}/10 (${layoutScreening.class}). Scor determinist orientativ, bazat pe datele disponibile.`;
+    criteria.layout.basis = `Subcriterii: suprafata si camere ${layoutScreening.subscores.A}, compartimentare ${layoutScreening.subscores.B}, bai ${layoutScreening.subscores.C}, bucatarie si depozitare ${layoutScreening.subscores.D}. Interval estimativ ${layoutScreening.interval.join('–')}/10.`;
+    criteria.layout.toVerify = layoutScreening.questions.join(' ') || 'Verificati planimetria si dimensiunile efective.';
+  }
+
+  const thermalScreening = evaluateThermalScreening({text:source});
+  if (thermalScreening.confidence >= 0.40) {
+    criteria.thermal.score = thermalScreening.score;
+    criteria.thermal.reason = `Confort termic ${thermalScreening.score}/10 (${thermalScreening.class}), estimat din anunt.`;
+    criteria.thermal.basis = `Algoritmul utilizatorului v3.8: izolatie ${thermalScreening.subscores.izolatie}, ferestre ${thermalScreening.subscores.ferestre}, incalzire ${thermalScreening.subscores.incalzire}, eficienta ${thermalScreening.subscores.eficienta}, ventilatie ${thermalScreening.subscores.ventilatie}. IC ${thermalScreening.confidence}.`;
+    criteria.thermal.toVerify = 'Solicitati certificatul energetic, facturile sezoniere si detalii despre izolatie, ferestre si ventilatie. Valorile lipsa sunt estimate, nu verificate.';
+  }
+  const acousticScreening = evaluateAcousticScreening({text:source});
+  if (acousticScreening.confidence >= 0.40) {
+    criteria.acoustic.score = acousticScreening.score;
+    criteria.acoustic.reason = `Confort acustic ${acousticScreening.score}/10 (${acousticScreening.class}), estimare din anunt, nu masuratoare fonica.`;
+    criteria.acoustic.basis = `Algoritmul utilizatorului v3.9: izolare intre apartamente ${acousticScreening.subscores.izolare ?? 'neaplicabil'}, zgomot exterior ${acousticScreening.subscores.exterior}, pozitie ${acousticScreening.subscores.pozitie}, ferestre ${acousticScreening.subscores.ferestre}. Incredere ${acousticScreening.confidence}.`;
+    criteria.acoustic.toVerify = 'Verificati zgomotul la ore de varf si noaptea, izolarea intre apartamente si specificatiile acustice ale ferestrelor. Estimarile in dB nu sunt masuratori.';
+  }
   // Acoperirea este raportata numai cand exista provenienta pozitiva identificata.
   // Zero etichete pozitive nu dovedeste zero informatii in anunt.
   const coveredWeight = keys.reduce((s,k)=>s+(["documented","declared","inferred"].includes(criteria[k].evidence)?weights[k]:0),0);
@@ -251,9 +289,10 @@ Schema obligatorie: {"summary":"string","criteria":{"structural":{"score":5,"sub
   };
   const marketNotes = guardMarketScores(acquisition,investment,source);
   const general = clampScore(quality*0.7 + acquisition.score*0.3);
-  const priceEstimate = estimatePrice(source,parsed.propertyFacts);
   const marketCalibration = marketPosition(source);
+  const priceEstimate = estimatePrice(source,parsed.propertyFacts,marketCalibration.askingPriceEur);
   const reliability = scoreReliability(criteria,marketCalibration,rubricChanges);
   const rentalScenario = marketCalibration.askingPriceEur && marketCalibration.areaSqm ? investmentScenario({price:marketCalibration.askingPriceEur,area:marketCalibration.areaSqm,rentPerSqm:marketData.benchmarks.find(b=>b.source==='Castela'&&b.metric==='rent_asking_eur_sqm_month')?.value??NaN,occupancy:0.92}) : null;
-  return json({engine:{version:'3.3.0',method:'AI pentru extragere + reguli deterministe auditate',calibrationCases:3,calibrationNotes,rubricChanges,marketNotes,marketData:'agregate numerice ANEVAR 2019-2020, Market360 2024, Castela si Imobiliare.ro 2026; fara comparabile individuale'},priceEstimate,marketCalibration,reliability,rentalScenario,marketEvidence:{benchmark:marketData.benchmarks,sourceRegistry:marketData.sources,limitations:marketData.limitations,updated:marketData.version},summary:String(parsed.summary||''),criteria,quality,acquisition,general,coverage,completeness,investment,confidence:String(parsed.confidence||''),layout:String(parsed.layout||''),warnings:array(parsed.warnings),missing:array(parsed.missing),questions:array(parsed.questions),checklist:array(parsed.checklist)});
+  const algorithmV34 = evaluateAlgorithmV34({profile:'home'}); // Awaiting verified indicators; legacy scores remain visible.
+  return json({structuralScreening,layoutScreening,thermalScreening,acousticScreening,algorithmV34,engine:{version:'3.3.0',method:'AI pentru extragere + reguli deterministe auditate',calibrationCases:3,calibrationNotes,rubricChanges,marketNotes,marketData:'agregate numerice ANEVAR 2019-2020, Market360 2024, Castela si Imobiliare.ro 2026; fara comparabile individuale'},priceEstimate,marketCalibration,reliability,rentalScenario,marketEvidence:{benchmark:marketData.benchmarks,sourceRegistry:marketData.sources,limitations:marketData.limitations,updated:marketData.version},summary:String(parsed.summary||''),criteria,quality,acquisition,general,coverage,completeness,investment,confidence:String(parsed.confidence||''),layout:String(parsed.layout||''),warnings:array(parsed.warnings),missing:array(parsed.missing),questions:array(parsed.questions),checklist:array(parsed.checklist)});
 }
