@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { calibrateCriteria, guardMarketScores } from '../../lib/hybrid-engine';
 import marketData from '../../data/market-cluj.json';
 import {marketPosition, marketPrompt} from '../../lib/market-calibration';
+import {applyEvidenceRubric, scoreReliability, investmentScenario} from '../../lib/scoring-v33';
 
 export const runtime = 'nodejs';
 const allowed = ['imobiliare.ro','storia.ro','olx.ro','homezz.ro','romimo.ro','publi24.ro','remax.ro','blitz.ro','napocaimobiliare.ro'];
@@ -110,7 +111,10 @@ function normalizeCriteria(obj,source) {
 }
 // Repere publicate de Indicele Imobiliare.ro pentru apartamente in Cluj-Napoca.
 // Sunt preturi SOLICITATE medii, nu tranzactii si nu istoric al locuintei analizate.
-const CLUJ_INDEX = [{label:'Iul 2026',value:3306,kind:'indice verificat'}];
+const CLUJ_INDEX = [
+  {label:'Iul 2026',period:'2026-07',value:3306,kind:'istoric'},
+  {label:'Sep 2026',period:'2026-09',value:3316,kind:'istoric'}
+];
 function estimatePrice(source, facts) {
   const numeric = n => Number.isFinite(Number(n)) && Number(n)>0 ? Number(n) : null;
   // Extragem numai valori prezente explicit; modelul nu are voie sa inventeze suprafete.
@@ -124,20 +128,25 @@ function estimatePrice(source, facts) {
   const sqm = safeArea || 55; // suprafata EXEMPLU, NU media publicata de indice si NU caracteristica proprietatii
   const newest = CLUJ_INDEX.at(-1).value;
   const baseline = sqm*newest;
-  // Tendinta temperata: media anuala observata este redusa, pentru a evita extrapolarea agresiva.
-  const observedAnnual = 0; // O singura observatie verificata: tendinta istorica NU poate fi calculata.
-  const forecastAnnual = Math.max(-0.03,Math.min(0.04,observedAnnual*0.5));
-  const history = CLUJ_INDEX.map(x=>({label:x.label,value:Math.round(sqm*x.value),kind:'reper indexat, nu istoric individual'}));
-  // Nu generam puncte viitoare cu aparenta de prognoza calibrata dintr-o singura observatie.
+  // Doua observatii publice permit o linie istorica scurta, NU un trend anual robust.
+  // Scenariul central este constant; intervalele +/-4% pe an sunt ipoteze ilustrative.
+  const history = CLUJ_INDEX.map(x=>({label:x.label,period:x.period,value:Math.round(sqm*x.value),kind:'istoric',eurSqm:x.value}));
+  const horizons=[3,6,12];
+  const forecast=horizons.map(months=>({
+    label:`+${months} luni`,months,kind:'prognoza',
+    value:Math.round(baseline),
+    low:Math.round(baseline*Math.pow(0.96,months/12)),
+    high:Math.round(baseline*Math.pow(1.04,months/12))
+  }));
   const margin=typical?0.25:0.18;
   return {
-    low:Math.round(baseline*(1-margin)),mid:Math.round(baseline),high:Math.round(baseline*(1+margin)),history,
-    typical,areaSqm:sqm,forecastAnnual:Math.round(forecastAnnual*1000)/10,
+    low:Math.round(baseline*(1-margin)),mid:Math.round(baseline),high:Math.round(baseline*(1+margin)),history,forecast,
+    typical,areaSqm:sqm,forecastAnnual:0,forecastConfidence:'scazuta',marketEurSqm:newest,marketPeriod:'2026-09',
     basis:typical
       ? 'Reper de piata pentru un apartament exemplificativ de 55 mp in Cluj-Napoca; suprafata locuintei analizate nu a fost confirmata.'
-      : `Estimare orientativa: ${sqm} mp × ${newest.toLocaleString('ro-RO')} €/mp (indicele Cluj-Napoca, iulie 2026). Nu reprezinta pret de tranzactionare.`,
+      : `Estimare orientativa: ${sqm} mp × ${newest.toLocaleString('ro-RO')} €/mp (indicele Cluj-Napoca, septembrie 2026). Nu reprezinta pret de tranzactionare.`,
     sourceUrl:'https://www.imobiliare.ro/indicele-imobiliare-ro/cluj-napoca',
-    method:'Indicele Imobiliare.ro, iulie 2026. Un singur reper verificat; nu exista istoric individual sau prognoza validata.'
+    method:'Indicele Imobiliare.ro, iulie si septembrie 2026. Doua observatii istorice; prognoza este un scenariu constant +/-4% anual, nu predictie statistica validata.'
   };
 }
 function array(value) { return Array.isArray(value) ? value.filter(x=>typeof x==='string').slice(0,12) : []; }
@@ -193,6 +202,7 @@ Schema obligatorie: {"summary":"string","criteria":{"structural":{"score":5,"sub
   } catch { return json({error:'Raspuns AI invalid. Incearca din nou.'},502); }
   const criteria = normalizeCriteria(parsed.criteria,source);
   const calibrationNotes = calibrateCriteria(criteria,source);
+  const rubricChanges = applyEvidenceRubric(criteria,source);
   // Acoperirea este raportata numai cand exista provenienta pozitiva identificata.
   // Zero etichete pozitive nu dovedeste zero informatii in anunt.
   const coveredWeight = keys.reduce((s,k)=>s+(["documented","declared","inferred"].includes(criteria[k].evidence)?weights[k]:0),0);
@@ -243,5 +253,7 @@ Schema obligatorie: {"summary":"string","criteria":{"structural":{"score":5,"sub
   const general = clampScore(quality*0.7 + acquisition.score*0.3);
   const priceEstimate = estimatePrice(source,parsed.propertyFacts);
   const marketCalibration = marketPosition(source);
-  return json({engine:{version:'3.2.1',method:'AI pentru extragere + reguli deterministe auditate',calibrationCases:3,calibrationNotes,marketNotes,marketData:'agregate numerice ANEVAR 2019-2020, Market360 2024, Castela si Imobiliare.ro 2026; fara comparabile individuale'},priceEstimate,marketCalibration,marketEvidence:{benchmark:marketData.benchmarks,sourceRegistry:marketData.sources,limitations:marketData.limitations,updated:marketData.version},summary:String(parsed.summary||''),criteria,quality,acquisition,general,coverage,completeness,investment,confidence:String(parsed.confidence||''),layout:String(parsed.layout||''),warnings:array(parsed.warnings),missing:array(parsed.missing),questions:array(parsed.questions),checklist:array(parsed.checklist)});
+  const reliability = scoreReliability(criteria,marketCalibration,rubricChanges);
+  const rentalScenario = marketCalibration.askingPriceEur && marketCalibration.areaSqm ? investmentScenario({price:marketCalibration.askingPriceEur,area:marketCalibration.areaSqm,rentPerSqm:marketData.benchmarks.find(b=>b.source==='Castela'&&b.metric==='rent_asking_eur_sqm_month')?.value??NaN,occupancy:0.92}) : null;
+  return json({engine:{version:'3.3.0',method:'AI pentru extragere + reguli deterministe auditate',calibrationCases:3,calibrationNotes,rubricChanges,marketNotes,marketData:'agregate numerice ANEVAR 2019-2020, Market360 2024, Castela si Imobiliare.ro 2026; fara comparabile individuale'},priceEstimate,marketCalibration,reliability,rentalScenario,marketEvidence:{benchmark:marketData.benchmarks,sourceRegistry:marketData.sources,limitations:marketData.limitations,updated:marketData.version},summary:String(parsed.summary||''),criteria,quality,acquisition,general,coverage,completeness,investment,confidence:String(parsed.confidence||''),layout:String(parsed.layout||''),warnings:array(parsed.warnings),missing:array(parsed.missing),questions:array(parsed.questions),checklist:array(parsed.checklist)});
 }

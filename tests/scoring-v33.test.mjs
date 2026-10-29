@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {applyEvidenceRubric,scoreReliability,investmentScenario} from '../app/lib/scoring-v33.js';
+const sample=()=>({layout:{score:9,subcriteria:{area:{score:8},distribution:{score:9},bathrooms:{score:8},kitchen:{score:8}},basis:''},materials:{score:8,subcriteria:{quality:{score:8},workmanship:{score:8},design:{score:8},condition:{score:8}},basis:''},visual:{score:8,subcriteria:{orientation:{score:8},windows:{score:8},obstructions:{score:8},view:{score:8}},basis:''},acoustic:{score:8,subcriteria:{between:{score:8},outside:{score:8},position:{score:8},windows:{score:8}},basis:''}});
+let c=sample();let changes=applyEvidenceRubric(c,'Apartament semidecomandat, parter, finisaje vechi, langa calea ferata');
+assert.equal(c.layout.subcriteria.distribution.score,6.5);assert.equal(c.visual.subcriteria.obstructions.score,7);assert.equal(c.materials.subcriteria.condition.score,5);assert.equal(c.acoustic.subcriteria.outside.score,6);assert.equal(changes.length,4);
+c=sample();applyEvidenceRubric(c,'Apartament decomandat, fara infiltratii');assert.equal(c.layout.subcriteria.distribution.score,9);assert.equal(c.materials.subcriteria.condition.score,8);
+c=sample();applyEvidenceRubric(c,'Apartament semidecomandat');assert.equal(c.layout.subcriteria.distribution.score,6.5);
+const r=scoreReliability(c,{},[]);assert.equal(r.financial,'scazuta');
+const y=investmentScenario({price:100000,area:50,rentPerSqm:10,occupancy:0.9,annualCosts:1200});assert.equal(y.grossYieldPercent,6);assert.equal(y.illustrativeNetYieldPercent,4.2);assert.equal(y.verified,false);
+assert.equal(investmentScenario({price:0,area:50,rentPerSqm:10}),null);
+console.log('v3.3 scoring tests OK');

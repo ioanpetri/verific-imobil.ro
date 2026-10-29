@@ -44,3 +44,7 @@ Nu adăuga `.env.local` sau cheia `OPENAI_API_KEY` în Git.
 
 ## Actualizare v3.2.1 — date numerice publice
 Vezi `SPRINT-v3.2.1.md`. Include agregate ANEVAR, Market360, Castela si Imobiliare.ro si campul `marketCalibration` in API. Aceste repere sunt context, nu comparabile individuale sau model statistic antrenat.
+
+## Actualizare v3.3.1 — evaluare de piata
+
+Vezi `SPRINT-v3.3.1.md`. Indicatorii si graficul sunt conectati la `priceEstimate` din API. Punctele istorice folosesc valorile deja consemnate in proiect (iulie 2026: 3306 EUR/mp; septembrie 2026: 3316 EUR/mp), fara verificare independenta noua in acest sprint. Scenariile sunt explicit ipotetice.
