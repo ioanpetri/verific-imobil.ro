@@ -41,3 +41,6 @@ Include bar chart pentru scorurile celor opt criterii, donut chart pentru acoper
 6. Rulează `git push origin main` (sau ramura principală reală a repository-ului).
 
 Nu adăuga `.env.local` sau cheia `OPENAI_API_KEY` în Git.
+
+## Actualizare v3.2.1 — date numerice publice
+Vezi `SPRINT-v3.2.1.md`. Include agregate ANEVAR, Market360, Castela si Imobiliare.ro si campul `marketCalibration` in API. Aceste repere sunt context, nu comparabile individuale sau model statistic antrenat.

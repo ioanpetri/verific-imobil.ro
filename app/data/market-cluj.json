@@ -1,0 +1,177 @@
+{
+  "version": "2026-10-29",
+  "scope": "Cluj-Napoca",
+  "benchmarks": [
+    {
+      "source": "Imobiliare.ro Indice",
+      "url": "https://www.imobiliare.ro/indicele-imobiliare-ro/cluj-napoca",
+      "period": "2026-09",
+      "metric": "asking_eur_sqm",
+      "segment": "all",
+      "value": 3316,
+      "unit": "EUR/mp",
+      "kind": "asking",
+      "scope": "Cluj-Napoca"
+    },
+    {
+      "source": "Imobiliare.ro Indice",
+      "url": "https://www.imobiliare.ro/indicele-imobiliare-ro/cluj-napoca",
+      "period": "2026-09",
+      "metric": "asking_eur_sqm",
+      "segment": "new",
+      "value": 3500,
+      "unit": "EUR/mp",
+      "kind": "asking",
+      "scope": "Cluj-Napoca"
+    },
+    {
+      "source": "Imobiliare.ro Indice",
+      "url": "https://www.imobiliare.ro/indicele-imobiliare-ro/cluj-napoca",
+      "period": "2026-09",
+      "metric": "asking_eur_sqm",
+      "segment": "old",
+      "value": 3301,
+      "unit": "EUR/mp",
+      "kind": "asking",
+      "scope": "Cluj-Napoca"
+    },
+    {
+      "source": "Imobiliare.ro Indice",
+      "url": "https://www.imobiliare.ro/indicele-imobiliare-ro/cluj-napoca",
+      "period": "2026-09",
+      "metric": "selling_days",
+      "segment": "all",
+      "value": 91,
+      "unit": "zile",
+      "kind": "market_activity",
+      "scope": "Cluj-Napoca"
+    },
+    {
+      "source": "ANEVAR / Veridio",
+      "url": "https://www.anevar.ro/images/_upload/ghid-tranzactii-cluj-napoca-2020.pdf",
+      "period": "2020",
+      "metric": "transaction_avg_eur_sqm",
+      "segment": "apartments",
+      "value": 1477,
+      "unit": "EUR/mp",
+      "kind": "transactions_historical",
+      "scope": "Cluj-Napoca"
+    },
+    {
+      "source": "ANEVAR / Veridio",
+      "url": "https://www.anevar.ro/images/_upload/ghid-tranzactii-cluj-napoca-2019-compressed.pdf",
+      "period": "2019",
+      "metric": "transaction_avg_eur_sqm",
+      "segment": "apartments",
+      "value": 1362,
+      "unit": "EUR/mp",
+      "kind": "transactions_historical",
+      "scope": "Cluj-Napoca"
+    },
+    {
+      "source": "Castela",
+      "url": "https://castela.ro/statistici/cluj",
+      "period": "2026-09",
+      "metric": "asking_eur_sqm",
+      "segment": "apartments",
+      "value": 2708,
+      "unit": "EUR/mp",
+      "kind": "asking",
+      "scope": "judetul Cluj"
+    },
+    {
+      "source": "Castela",
+      "url": "https://castela.ro/statistici/cluj",
+      "period": "2026-09",
+      "metric": "rent_asking_eur_sqm_month",
+      "segment": "apartments",
+      "value": 10,
+      "unit": "EUR/mp/luna",
+      "kind": "asking_rent",
+      "scope": "judetul Cluj"
+    },
+    {
+      "source": "Castela / ANCPI",
+      "url": "https://castela.ro/statistici/cluj",
+      "period": "2026-04",
+      "metric": "transactions_count",
+      "segment": "all_properties",
+      "value": 2257,
+      "unit": "tranzactii",
+      "kind": "transactions_volume",
+      "scope": "judetul Cluj"
+    },
+    {
+      "source": "Market360",
+      "url": "https://market360.imobiliare.ro/wp-content/uploads/2024/11/Raport-T3_2024-WEB-copy.pdf",
+      "period": "2024-Q3",
+      "metric": "selling_days",
+      "segment": "apartments",
+      "value": 61,
+      "unit": "zile",
+      "kind": "market_activity_historical",
+      "scope": "Cluj-Napoca"
+    },
+    {
+      "source": "Market360",
+      "url": "https://market360.imobiliare.ro/wp-content/uploads/2024/11/Raport-T3_2024-WEB-copy.pdf",
+      "period": "2024-Q3",
+      "metric": "negotiation_margin_percent",
+      "segment": "apartments",
+      "value": 3.9,
+      "unit": "%",
+      "kind": "market_activity_historical",
+      "scope": "Cluj-Napoca"
+    }
+  ],
+  "sources": [
+    {
+      "name": "ANEVAR / Ghidul tranzactiilor Cluj",
+      "url": "https://www.anevar.ro/p/informatii-din-piata/proprietati-imobiliare/ghidul-tranzactiilor-de-la-cj",
+      "kind": "transactions",
+      "status": "numeric_historical_integrated",
+      "note": "Medii de tranzactionare 2019 si 2020, exclusiv istoric."
+    },
+    {
+      "name": "Market360",
+      "url": "https://market360.imobiliare.ro/rapoarte/",
+      "kind": "market_reports",
+      "status": "numeric_historical_integrated",
+      "note": "Indicatori T3 2024; nu sunt actuali."
+    },
+    {
+      "name": "Castela",
+      "url": "https://castela.ro/statistici/date",
+      "kind": "aggregates",
+      "status": "numeric_aggregates_integrated",
+      "note": "Mediane judetene, nu preturi din municipiu."
+    },
+    {
+      "name": "ANCPI",
+      "url": "https://www.ancpi.ro/",
+      "kind": "transaction_volume",
+      "status": "reference_only",
+      "note": "Volumele judetene nu sunt preturi de tranzactie individuala."
+    },
+    {
+      "name": "INSSE TEMPO",
+      "url": "https://statistici.insse.ro/tempo-ins/",
+      "kind": "macro",
+      "status": "reference_only",
+      "note": "Indicatori macro, fara serii importate."
+    },
+    {
+      "name": "ValorEasy",
+      "url": "https://www.valoreasy.ro/resurse/",
+      "kind": "reports",
+      "status": "reference_only"
+    },
+    {
+      "name": "Imo360",
+      "url": "https://www.imo360.ro/analiza-cluj-napoca",
+      "kind": "reports",
+      "status": "reference_only"
+    }
+  ],
+  "limitations": "Fara comparabile de microzona; surse cu geografii, perioade si metodologii diferite; niciun scor financiar nu este ajustat pe baza mediilor agregate."
+}

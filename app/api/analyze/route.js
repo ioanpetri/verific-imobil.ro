@@ -1,4 +1,7 @@
 import { NextResponse } from 'next/server';
+import { calibrateCriteria, guardMarketScores } from '../../lib/hybrid-engine';
+import marketData from '../../data/market-cluj.json';
+import {marketPosition, marketPrompt} from '../../lib/market-calibration';
 
 export const runtime = 'nodejs';
 const allowed = ['imobiliare.ro','storia.ro','olx.ro','homezz.ro','romimo.ro','publi24.ro','remax.ro','blitz.ro','napocaimobiliare.ro'];
@@ -53,6 +56,26 @@ const neighbourhoodBases = [
 function plain(text){return String(text||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9 ]/g,' ')}
 function areaBase(text){const t=plain(text);for(const [names,base] of neighbourhoodBases){if(names.some(name=>new RegExp('(^|\\s)'+name+'($|\\s)').test(t)))return base;}return null;}
 const clampScore = n=>Math.max(1,Math.min(10,Math.round(n*10)/10));
+// Explicatii deterministe per criteriu: nu transforma ipotezele in fapte.
+const analysisGuides = {
+ structural:{indicator:'anul constructiei, sistemul structural, interventiile si documentatia tehnica',verify:'Solicita cartea tehnica, autorizatia si, daca exista indicii de degradare, evaluarea unui inginer structurist.'},
+ layout:{indicator:'suprafata utila, numarul si dimensiunile camerelor, circulatiile, baile si depozitarea',verify:'Compara releveul cadastral cu compartimentarea reala si masoara spatiile utile la vizionare.'},
+ thermal:{indicator:'izolatia anvelopei, ferestrele, incalzirea, ventilatia si consumul energetic',verify:'Solicita certificatul energetic si facturi sezoniere; inspecteaza puntile termice si eventualele urme de condens.'},
+ acoustic:{indicator:'expunerea la trafic, pozitia in cladire, peretii comuni si izolarea ferestrelor',verify:'Viziteaza locuinta la ore de varf si seara; testeaza zgomotul cu ferestrele inchise si deschise.'},
+ visual:{indicator:'orientarea, dimensiunea ferestrelor, etajul, obstacolele si intimitatea',verify:'Verifica orientarea si lumina naturala la ore diferite, inclusiv eventualele constructii care obtureaza vederea.'},
+ materials:{indicator:'tipul finisajelor, calitatea montajului, durabilitatea si uzura vizibila',verify:'Inspecteaza imbinarile, pardoselile, instalatiile si eventualele defecte ascunse sub finisaje.'},
+ liveability:{indicator:'ergonomia, intimitatea, balconul, spatiile de depozitare si accesibilitatea',verify:'Testeaza circulatia, mobilarea reala, accesul si utilizarea zilnica a spatiilor la vizionare.'},
+ neighbourhood:{indicator:'localizarea exacta, transportul, serviciile, traficul, parcarea si microzona',verify:'Confirma adresa, timpii reali de deplasare si situatia parcarii prin vizite la ore diferite si surse locale.'}
+};
+const weakText = v => !v || String(v).trim().length<45 || /^(date limitate|verifica informatiile relevante|confirmă datele relevante|date insuficiente)/i.test(String(v).trim());
+function enrichAnalysis(key,v,sub,source){
+ const g=analysisGuides[key];
+ const detail=subcriteria[key].filter(([id])=>id!=='base').map(([id,name])=>`${name.toLowerCase()}: ${sub[id].score}/10`).join('; ');
+ const limited='Notele subcriteriilor sunt estimari orientative, nu masuratori sau verificari documentare.';
+ const basis=weakText(v.basis)?`Indicatori evaluati: ${detail}. ${limited} Repere de piata: Indicele Imobiliare.ro descrie preturi cerute la nivel de oras, nu confirma aceste caracteristici ale locuintei.`:String(v.basis);
+ const toVerify=weakText(v.toVerify)?`Interpretarea scorului se bazeaza pe ${g.indicator}; fara dovezi directe, concluzia ramane provizorie. ${g.verify}`:String(v.toVerify);
+ return {basis,toVerify};
+}
 function normalizeCriteria(obj,source) {
   const out = {};
   const base = areaBase(source);
@@ -76,13 +99,46 @@ function normalizeCriteria(obj,source) {
     }else{
       score=clampScore(subcriteria[key].reduce((sum,[id,,w])=>sum+sub[id].score*w,0)/100);
     }
+    const enriched=enrichAnalysis(key,v,sub,source);
     out[key]={score,subcriteria:sub,microzoneAdjustment:adjustment,neighbourhoodBase:key==='neighbourhood'?base:null,
       reason:String(v.reason||'Scor orientativ; sunt necesare mai multe informații pentru o evaluare precisă.'),
-      basis:String(v.basis||'Date limitate.'),toVerify:String(v.toVerify||'Verifică informațiile relevante.'),
+      basis:enriched.basis,toVerify:enriched.toVerify,
       confidence:['high','moderate','low'].includes(v.confidence)?v.confidence:'low',
       evidence:['declared','inferred','estimated','documented','unknown'].includes(v.evidence)?v.evidence:'estimated'};
   }
   return out;
+}
+// Repere publicate de Indicele Imobiliare.ro pentru apartamente in Cluj-Napoca.
+// Sunt preturi SOLICITATE medii, nu tranzactii si nu istoric al locuintei analizate.
+const CLUJ_INDEX = [{label:'Iul 2026',value:3306,kind:'indice verificat'}];
+function estimatePrice(source, facts) {
+  const numeric = n => Number.isFinite(Number(n)) && Number(n)>0 ? Number(n) : null;
+  // Extragem numai valori prezente explicit; modelul nu are voie sa inventeze suprafete.
+  const areaMatch = source.match(/(?:suprafata(?:\s+utila)?|suprafața(?:\s+utilă)?|utili|utila|utilă)\s*[:=]?\s*(\d{2,3}(?:[.,]\d+)?)\s*(?:mp|m²)/i)
+    || source.match(/\b(\d{2,3}(?:[.,]\d+)?)\s*(?:mp|m²)\s*(?:utili|utila|utilă)?\b/i);
+  const extractedArea = areaMatch ? Number(areaMatch[1].replace(',','.')) : null;
+  const area = extractedArea>=18 && extractedArea<=300 ? extractedArea : null;
+  const supplied = numeric(facts?.areaSqm);
+  const safeArea = area || (supplied>=18 && supplied<=300 && new RegExp(String(Math.round(supplied))).test(source) ? supplied : null);
+  const typical = !safeArea;
+  const sqm = safeArea || 55; // suprafata EXEMPLU, NU media publicata de indice si NU caracteristica proprietatii
+  const newest = CLUJ_INDEX.at(-1).value;
+  const baseline = sqm*newest;
+  // Tendinta temperata: media anuala observata este redusa, pentru a evita extrapolarea agresiva.
+  const observedAnnual = 0; // O singura observatie verificata: tendinta istorica NU poate fi calculata.
+  const forecastAnnual = Math.max(-0.03,Math.min(0.04,observedAnnual*0.5));
+  const history = CLUJ_INDEX.map(x=>({label:x.label,value:Math.round(sqm*x.value),kind:'reper indexat, nu istoric individual'}));
+  // Nu generam puncte viitoare cu aparenta de prognoza calibrata dintr-o singura observatie.
+  const margin=typical?0.25:0.18;
+  return {
+    low:Math.round(baseline*(1-margin)),mid:Math.round(baseline),high:Math.round(baseline*(1+margin)),history,
+    typical,areaSqm:sqm,forecastAnnual:Math.round(forecastAnnual*1000)/10,
+    basis:typical
+      ? 'Reper de piata pentru un apartament exemplificativ de 55 mp in Cluj-Napoca; suprafata locuintei analizate nu a fost confirmata.'
+      : `Estimare orientativa: ${sqm} mp × ${newest.toLocaleString('ro-RO')} €/mp (indicele Cluj-Napoca, iulie 2026). Nu reprezinta pret de tranzactionare.`,
+    sourceUrl:'https://www.imobiliare.ro/indicele-imobiliare-ro/cluj-napoca',
+    method:'Indicele Imobiliare.ro, iulie 2026. Un singur reper verificat; nu exista istoric individual sau prognoza validata.'
+  };
 }
 function array(value) { return Array.isArray(value) ? value.filter(x=>typeof x==='string').slice(0,12) : []; }
 
@@ -98,7 +154,8 @@ export async function POST(request) {
   const extracted = url ? await fetchListing(url) : '';
   if (extracted.length < 100 && description.length < 30) return json({error:'Nu am putut extrage anuntul. Adauga manual o descriere de minimum 30 de caractere.'},422);
   const source = [url ? `Link: ${url}` : '', extracted.length>=100 ? `Text extras: ${extracted}` : '',description ? `Descriere introdusa: ${description}` : ''].filter(Boolean).join('\n\n');
-  const system = `Ești analist imobiliar prudent pentru Cluj-Napoca și împrejurimi. Răspunde EXCLUSIV JSON valid în română. Evaluează fiecare dintre cele 8 criterii și fiecare subcriteriu cu o notă numerică de la 1 la 10. Dacă datele lipsesc, acordă 5/10 ca estimare neutră; nu inventa documente, expertize, caracteristici, prețuri comparabile sau măsurători. Scorurile 9 și 10 necesită indicii consistente. Pentru fiecare criteriu scrie în limba română un reason concis (1-2 fraze) care INTERPRETEAZĂ scorul prin logica imobiliară și indicatori de calitate specifici, nu doar repetă anunțul; basis enumeră indicatorii centrali și dovezile efectiv disponibile (1 frază); toVerify indică verificarea cea mai importantă și de ce poate schimba concluzia (1 frază). Nu repeta aceeași formulare între câmpuri. Pentru structural: anul, structura, degradările, expertiza; nu confunda termosistemul ori feroneria cu siguranța structurală. Pentru layout: mp utili, dimensiunile camerelor, decomandare, băi, bucătărie. Pentru thermal: anvelopă, tâmplărie, încălzire, consum, ventilație. Pentru acoustic: zgomot stradal, transmisie între apartamente, poziție, măsurători. Pentru visual: orientare, suprafață vitrată, obstacole, priveliște; balustrada de sticlă nu dovedește luminozitatea. Pentru materials: material, calitatea execuției, durabilitate și uzură. Pentru liveability: ergonomie, intimitate, terasă, depozitare, acces. Pentru neighbourhood: reperul calibrat, microzona, mobilitate, servicii, zgomot și acces; nu inventa criminalitate ori densitate. Un aspect necunoscut afectează certitudinea, nu dovedește un defect. evidence poate fi documented, declared, inferred, estimated; confidence poate fi high, moderate, low. Aceste etichete nu trebuie să apară în explicații ca texte repetitive.
+  const marketContext = marketPrompt();
+  const system = `Ești analist imobiliar prudent pentru Cluj-Napoca și împrejurimi. Răspunde EXCLUSIV JSON valid în română. Evaluează fiecare dintre cele 8 criterii și fiecare subcriteriu cu o notă numerică de la 1 la 10. Dacă datele lipsesc, acordă 5/10 ca estimare neutră; nu inventa documente, expertize, caracteristici, prețuri comparabile sau măsurători. Scorurile 9 și 10 necesită indicii consistente. Pentru fiecare criteriu scrie în limba română un reason concis (1-2 fraze) care INTERPRETEAZĂ scorul prin logica imobiliară și indicatori de calitate specifici, nu doar repetă anunțul; basis prezintă 2-3 indicatori specifici criteriului, cu valori concrete numai dacă apar în anunț; distinge explicit faptele din anunț de inferențe și repere de piață (2-3 fraze). toVerify explică efectul asupra scorului, apoi 1-2 verificări practice și motivul lor (2-3 fraze). Dacă nu există informații directe, explică ce indicatori contează, ce nu se poate deduce și cum se verifică; nu utiliza formulări generice. Nu repeta aceeași formulare între câmpuri. Pentru structural: anul, structura, degradările, expertiza; nu confunda termosistemul ori feroneria cu siguranța structurală. Pentru layout: mp utili, dimensiunile camerelor, decomandare, băi, bucătărie. Pentru thermal: anvelopă, tâmplărie, încălzire, consum, ventilație. Pentru acoustic: zgomot stradal, transmisie între apartamente, poziție, măsurători. Pentru visual: orientare, suprafață vitrată, obstacole, priveliște; balustrada de sticlă nu dovedește luminozitatea. Pentru materials: material, calitatea execuției, durabilitate și uzură. Pentru liveability: ergonomie, intimitate, terasă, depozitare, acces. Pentru neighbourhood: reperul calibrat, microzona, mobilitate, servicii, zgomot și acces; nu inventa criminalitate ori densitate. Un aspect necunoscut afectează certitudinea, nu dovedește un defect. evidence poate fi documented, declared, inferred, estimated; confidence poate fi high, moderate, low. Aceste etichete nu trebuie să apară în explicații ca texte repetitive.
 Scorurile criteriilor sunt calculate ulterior de server din subcriteriile pe care le furnizezi; nu calcula tu scorul general. Folosește EXACT aceste chei în subcriteria:
 structural: era, structure, documents, condition;
 layout: area, distribution, bathrooms, kitchen;
@@ -109,14 +166,14 @@ materials: quality, workmanship, design, condition;
 liveability: ergonomics, privacy, terrace, storage, access;
 neighbourhood: base, quiet, transport, walking, parking.
 Pentru neighbourhood, serverul aplică grila de cartiere: 5/5 reper 9 (Centru/Ultracentru, Gheorgheni, Andrei Mureșanu); 4/5 reper 8 (Grigorescu, Zorilor, Mărăști, Plopilor); 3/5 reper 6 (Mănăștur, Bună Ziua, Borhanci, Sopor); 2/5 reper 4 (Iris, Someșeni, Bulgaria); 1/5 reper 2 (Florești, Baciu, Apahida). Furnizează microzoneAdjustment între -2 și +2 în pași de 0,5, justificat STRICT prin informații despre microzonă, trafic, acces, zgomot și servicii. Dacă nu sunt indicii suficiente, folosește 0. Nu confunda calitatea clădirii cu amplasamentul. Serverul impune limita ±2 și intervalul 1–10. Pentru cartiere neidentificate, estimează prudent neighbourhood.score, fără să inventezi un reper.
-Siguranța structurală nu poate fi confirmată numai din anul clădirii. Riscurile grave, dacă sunt cunoscute, trebuie explicate la criteriul corespunzător, nu ascunse. Pentru investiție ia în calcul echilibrul dintre randament net din chirie, apreciere, lichiditate și preț/riscuri; chiar dacă lipsesc date economice, investment.score TREBUIE să fie un număr între 1 și 10, cu estimare neutră 5/10 dacă nu există indicii suficiente. Folosește prețul, suprafața, cartierul și calitatea proprietății când sunt disponibile. Nu inventa chirii, randamente, tranzacții comparabile sau apreciere viitoare. Explică limpede ce este cunoscut și ce nu.
+Siguranța structurală nu poate fi confirmată numai din anul clădirii. Riscurile grave, dacă sunt cunoscute, trebuie explicate la criteriul corespunzător, nu ascunse. Pentru investiție ia în calcul echilibrul dintre randament net din chirie, apreciere, lichiditate și preț/riscuri; chiar dacă lipsesc date economice, investment.score TREBUIE să fie un număr între 1 și 10, cu estimare neutră 5/10 dacă nu există indicii suficiente. Folosește prețul, suprafața, cartierul și calitatea proprietății când sunt disponibile. Nu inventa chirii, randamente, tranzacții comparabile sau apreciere viitoare. Reguli calibrate pe trei evaluari umane: semidecomandarea limiteaza compartimentarea, parterul necesita verificarea luminii si intimitatii, iar apropierea garii poate creste riscul acustic fara a dovedi zgomot. Acestea sunt ipoteze de verificat, nu defecte certe. Explică limpede ce este cunoscut și ce nu.
 Pentru atractivitatea achizitiei furnizeaza acquisition.subscores cu priceValue, buyerDemand, compromises, resale (1-10 fiecare). Componentele sunt raport pret/calitate fata de comparabile verificate, cerere pentru segmentul de suprafata/buget, compromisuri si costuri, flexibilitate la revanzare. Fara comparabile verificabile, priceValue=5 neutru; nu afirma ca pretul este sub piata fara dovezi. Pentru investitie furnizeaza investment.subscores cu netYield, appreciation, liquidity, entryRisk (1-10 fiecare). Randamentul NET cere chirie estimata fundamentat, grad de ocupare, taxe, mentenanta si costuri; in absenta lor netYield=5. Aprecierea viitoare fara date verificabile =5. Lichiditatea poate tine cont prudent de suprafata, buget total, amplasament si etaj; nu penaliza automat suprafata peste 70mp. Prețul de intrare nu poate fi declarat avantajos fara comparabile. Explica lipsurile. Nu folosi N/A. Daca nu poti justifica o nota, foloseste 5 ca estimare neutra. Scorul general este calculat de server ca 70% locuire si 30% atractivitatea achizitiei. Nu confunda scorul de investitie cu scorul general. Pentru provenienta datelor, clasifica criteriul ca declared sau documented doar cand exista indicatori concreti in anunt, altfel inferred daca dedus explicit ori estimated daca neutru.
 Schema obligatorie: {"summary":"string","criteria":{"structural":{"score":5,"subcriteria":{"era":5,"structure":5,"documents":5,"condition":5},"reason":"string","basis":"string","toVerify":"string","evidence":"estimated","confidence":"low"},"layout":{"subcriteria":{"area":5,"distribution":5,"bathrooms":5,"kitchen":5},"reason":"string"},"thermal":{"subcriteria":{"insulation":5,"windows":5,"heating":5,"energy":5,"ventilation":5}},"acoustic":{"subcriteria":{"between":5,"outside":5,"position":5,"windows":5}},"visual":{"subcriteria":{"orientation":5,"windows":5,"obstructions":5,"view":5}},"materials":{"subcriteria":{"quality":5,"workmanship":5,"design":5,"condition":5}},"liveability":{"subcriteria":{"ergonomics":5,"privacy":5,"terrace":5,"storage":5,"access":5}},"neighbourhood":{"score":5,"microzoneAdjustment":0,"subcriteria":{"base":5,"quiet":5,"transport":5,"walking":5,"parking":5}}},"acquisition":{"subscores":{"priceValue":5,"buyerDemand":5,"compromises":5,"resale":5},"reason":"string"},"investment":{"subscores":{"netYield":5,"appreciation":5,"liquidity":5,"entryRisk":5},"reason":"string"},"layout":"string"}. Completează reason, basis, toVerify, evidence și confidence pentru TOATE criteriile, după modelul structural. Scorurile sunt orientative, nu expertize certificate.`;
   let upstream;
   try {
     upstream = await fetch('https://api.openai.com/v1/chat/completions',{
       method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${process.env.OPENAI_API_KEY}`},
-      body:JSON.stringify({model:'gpt-4o-mini',temperature:0.2,response_format:{type:'json_object'},messages:[{role:'system',content:system},{role:'user',content:source}] }),signal:AbortSignal.timeout(45000)
+      body:JSON.stringify({model:'gpt-4o-mini',temperature:0.2,response_format:{type:'json_object'},messages:[{role:'system',content:system+'\n'+marketContext},{role:'user',content:source}] }),signal:AbortSignal.timeout(45000)
     });
   } catch { return json({error:'Conexiunea la OpenAI a esuat sau a expirat.'},502); }
   if (!upstream.ok) {
@@ -135,6 +192,7 @@ Schema obligatorie: {"summary":"string","criteria":{"structural":{"score":5,"sub
     parsed = JSON.parse(payload.choices?.[0]?.message?.content || '{}');
   } catch { return json({error:'Raspuns AI invalid. Incearca din nou.'},502); }
   const criteria = normalizeCriteria(parsed.criteria,source);
+  const calibrationNotes = calibrateCriteria(criteria,source);
   // Acoperirea este raportata numai cand exista provenienta pozitiva identificata.
   // Zero etichete pozitive nu dovedeste zero informatii in anunt.
   const coveredWeight = keys.reduce((s,k)=>s+(["documented","declared","inferred"].includes(criteria[k].evidence)?weights[k]:0),0);
@@ -181,6 +239,9 @@ Schema obligatorie: {"summary":"string","criteria":{"structural":{"score":5,"sub
     ...normalizedPart(parsed.investment,[['netYield',25],['appreciation',25],['liquidity',25],['entryRisk',25]]),
     reason:String(parsed.investment?.reason || 'Estimare orientativă. Fără date verificabile despre chiria netă, piață și costuri, componentele necunoscute sunt neutre (5/10).')
   };
+  const marketNotes = guardMarketScores(acquisition,investment,source);
   const general = clampScore(quality*0.7 + acquisition.score*0.3);
-  return json({summary:String(parsed.summary||''),criteria,quality,acquisition,general,coverage,completeness,investment,confidence:String(parsed.confidence||''),layout:String(parsed.layout||''),warnings:array(parsed.warnings),missing:array(parsed.missing),questions:array(parsed.questions),checklist:array(parsed.checklist)});
+  const priceEstimate = estimatePrice(source,parsed.propertyFacts);
+  const marketCalibration = marketPosition(source);
+  return json({engine:{version:'3.2.1',method:'AI pentru extragere + reguli deterministe auditate',calibrationCases:3,calibrationNotes,marketNotes,marketData:'agregate numerice ANEVAR 2019-2020, Market360 2024, Castela si Imobiliare.ro 2026; fara comparabile individuale'},priceEstimate,marketCalibration,marketEvidence:{benchmark:marketData.benchmarks,sourceRegistry:marketData.sources,limitations:marketData.limitations,updated:marketData.version},summary:String(parsed.summary||''),criteria,quality,acquisition,general,coverage,completeness,investment,confidence:String(parsed.confidence||''),layout:String(parsed.layout||''),warnings:array(parsed.warnings),missing:array(parsed.missing),questions:array(parsed.questions),checklist:array(parsed.checklist)});
 }
